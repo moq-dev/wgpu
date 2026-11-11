@@ -42,6 +42,12 @@ Bottom level categories:
 
 ## Unreleased
 
+### Bug Fixes
+
+#### General
+
+- `Surface::configure` no longer fails with `GpuWaitTimeout` when another thread submits during its wait for the GPU, and blocks submits and presents during the backend configure.
+
 ## v30.0.1 (2026-08-21)
 
 ### Bug Fixes

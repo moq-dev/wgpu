@@ -5343,13 +5343,10 @@ impl Device {
                     self.maintain(wgt::PollType::wait_indefinitely(), snatch_guard);
 
                 match maintain_result {
-                    // We're happy
-                    Ok(wgt::PollStatus::QueueEmpty) => {}
-                    Ok(wgt::PollStatus::WaitSucceeded) => {
-                        // After the wait, the queue should be empty. It can only be non-empty
-                        // if another thread is submitting at the same time.
-                        break 'error E::GpuWaitTimeout;
-                    }
+                    // The queue is non-empty after a successful wait only if another
+                    // thread submitted during it. The wait before the hal configure,
+                    // below, covers that work.
+                    Ok(wgt::PollStatus::QueueEmpty | wgt::PollStatus::WaitSucceeded) => {}
                     Ok(wgt::PollStatus::Poll) => {
                         unreachable!("Cannot get a Poll result from a Wait action.")
                     }
@@ -5378,7 +5375,27 @@ impl Device {
                 // https://github.com/gfx-rs/wgpu/issues/4105
 
                 let surface_raw = surface.raw(self.backend()).unwrap();
-                match unsafe { surface_raw.configure(self.raw(), &hal_config) } {
+                // [`hal::Surface::configure`] needs the queue idle and, like
+                // [`hal::Queue::present`], synchronized with submits and presents.
+                // Locking command indices blocks both, so nothing can be submitted
+                // between this wait and the configure.
+                let command_indices = self.command_indices.write();
+                let last_submission_index = self
+                    .last_successful_submission_index
+                    .load(Ordering::Acquire);
+                let configured = match unsafe {
+                    self.raw()
+                        .wait(self.fence.as_ref(), last_submission_index, None)
+                } {
+                    // As above, wasm cannot wait, and WebGL does not need to.
+                    Ok(done) if done || cfg!(target_arch = "wasm32") => unsafe {
+                        surface_raw.configure(self.raw(), &hal_config)
+                    },
+                    Ok(_) => break 'error E::GpuWaitTimeout,
+                    Err(error) => Err(hal::SurfaceError::Device(error)),
+                };
+                drop(command_indices);
+                match configured {
                     Ok(()) => (),
                     Err(error) => {
                         break 'error match error {
